@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Node / Electron
+node_modules/
+dist/
+out/
+.vite/
+*.log
+
+# Coverage
+coverage/
+
+# Environment
+.env
+
+# Claude
+.claude/
+graphify-out/
+build/pyinstaller-server/PYZ-00.pyz
+build/pyinstaller-server/agentic-server.pkg

@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-surface: oklch(18% 0.005 85);
+  --color-surface-elevated: oklch(22% 0.005 85);
+  --color-surface-overlay: oklch(26% 0.005 85);
+  --color-text-primary: oklch(92% 0.005 85);
+  --color-text-secondary: oklch(72% 0.005 85);
+  --color-text-muted: oklch(50% 0.005 85);
+  --color-accent: oklch(65% 0.19 40);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Focus ──────────────────────────────────── */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-accent);
+  border-radius: 2px;
+}
+
+/* ── Skip link ──────────────────────────────── */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 12px;
+  z-index: 9999;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: oklch(92% 0.005 85);
+  background: oklch(26% 0.005 85);
+  border-radius: 6px;
+  text-decoration: none;
+  transition: top 0.15s;
+}
+.skip-link:focus { top: 12px; }
+
+/* ── Scrollbar ──────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: oklch(30% 0.005 85);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: oklch(40% 0.005 85); }
+
+/* ── Selection ──────────────────────────────── */
+::selection {
+  background: oklch(65% 0.19 40 / 0.25);
+  color: oklch(92% 0.005 85);
+}

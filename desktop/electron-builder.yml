@@ -1,0 +1,36 @@
+appId: com.agentic-engineering.console
+productName: Agentic Engineering Console
+directories:
+  buildResources: build
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.*'
+  - '!{.eslintrc,.prettierrc,tsconfig*.json,tailwind.config.*,postcss.config.*}'
+  - '!{dev-app-update.yml,CHANGELOG.md,README.md}'
+extraResources:
+  - from: ../dist/agentic-server.exe
+    to: backend
+  - from: ../.env.example
+    to: .env.example
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${name}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
+linux:
+  target:
+    - AppImage
+  artifactName: ${name}-${version}.${ext}
+mac:
+  target:
+    - dmg
+  artifactName: ${name}-${version}.${ext}

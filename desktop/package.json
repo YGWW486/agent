@@ -1,0 +1,53 @@
+{
+  "name": "agentic-engineering-console",
+  "version": "0.1.0",
+  "description": "Agentic Engineering Console — Electron Desktop Frontend",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "package": "electron-vite build && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "zustand": "^5.0.0",
+    "@monaco-editor/react": "^4.6.0",
+    "@xyflow/react": "^12.3.0",
+    "@radix-ui/react-dialog": "^1.1.0",
+    "@radix-ui/react-select": "^2.1.0",
+    "@radix-ui/react-tabs": "^1.1.0",
+    "@radix-ui/react-slot": "^1.1.0",
+    "tailwindcss": "^3.4.0",
+    "lucide-react": "^0.460.0",
+    "electron-store": "^10.0.0",
+    "clsx": "^2.1.0",
+    "class-variance-authority": "^0.7.0",
+    "tailwind-merge": "^2.5.0"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "^3.0.0",
+    "@electron-toolkit/utils": "^4.0.0",
+    "electron": "^33.2.0",
+    "electron-vite": "^2.3.0",
+    "electron-builder": "^25.1.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/jest-dom": "^6.6.0",
+    "jsdom": "^25.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^22.0.0",
+    "playwright": "^1.49.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0"
+  }
+}

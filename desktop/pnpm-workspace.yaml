@@ -1,0 +1,5 @@
+allowBuilds:
+  '[': true
+  ']': true
+  electron: false
+  esbuild: false
