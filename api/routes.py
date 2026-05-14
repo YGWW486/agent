@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent.orchestrator import get_workflow
-from agent.llm import get_llm
 from agent.models import review_to_json, review_from_json, dag_from_json, coder_output_from_json, ReviewResult
 from config.settings import get_settings
 from api.index_routes import router as index_router
@@ -79,8 +78,14 @@ def _summarize_node_output(node_name: str, output: dict) -> dict:
             from agent.models import review_from_json
             r = review_from_json(review)
             summary["verdict"] = r.verdict
+            summary["reason"] = r.reason
             summary["test_count"] = len(r.test_cases)
             summary["_test_cases"] = [t.model_dump() for t in r.test_cases]
+            # 附带测试执行结果
+            tr = output.get("test_results", "")
+            if tr:
+                import json
+                summary["_test_results"] = json.loads(tr) if isinstance(tr, str) else tr
         except Exception:
             pass
         return summary
@@ -246,6 +251,7 @@ async def start_workflow(req: WorkflowRequest):
         "failure_reason": "",
         "failed_node": "",
         "consecutive_coder_failures": 0,
+        "test_results": "",
     }
 
     # Store initial state so get_workflow_status works immediately
@@ -290,9 +296,31 @@ async def get_workflow_status(thread_id: str):
     try:
         from agent.models import review_from_json
         rev = review_from_json(wf.get("review", ""))
-        review_summary = {"verdict": rev.verdict, "reason": rev.reason[:200]}
+        review_summary = {
+            "verdict": rev.verdict,
+            "reason": rev.reason[:200],
+            "test_count": len(rev.test_cases),
+            "test_cases": [t.model_dump() for t in rev.test_cases],
+        }
     except Exception:
         review_summary = None
+
+    self_check = None
+    try:
+        from agent.models import coder_output_from_json
+        co = coder_output_from_json(wf.get("code", ""))
+        self_check = [s.model_dump() for s in co.self_check.items]
+    except Exception:
+        self_check = None
+
+    test_results = None
+    tr = wf.get("test_results", "")
+    if tr:
+        import json as _json
+        try:
+            test_results = _json.loads(tr) if isinstance(tr, str) else tr
+        except Exception:
+            pass
 
     return {
         "thread_id": thread_id,
@@ -300,6 +328,8 @@ async def get_workflow_status(thread_id: str):
         "plan_summary": plan_summary,
         "code": wf.get("code", "")[:2000],
         "review_summary": review_summary,
+        "self_check": self_check,
+        "test_results": test_results,
         "revision_count": wf.get("revision_count"),
         "current_task_index": wf.get("current_task_index"),
         "suspended": wf.get("suspended", False),
@@ -443,11 +473,12 @@ async def list_capabilities():
 @router.get("/health")
 async def health():
     """健康检查"""
-    llm = get_llm()
+    from agent.llm import get_llm_info
+    info = get_llm_info()
     return {
         "status": "ok",
-        "model": llm.model,
-        "token_usage": llm.token_usage(),
+        "model": info["model"],
+        "token_usage": info["token_usage"],
     }
 
 

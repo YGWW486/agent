@@ -63,7 +63,12 @@ export function useWorkflow(threadId: string | null) {
                 }
               : n,
           )
-          updateWorkflow(threadId, { nodes: [...nodesRef.current] })
+          const patch: Record<string, unknown> = { nodes: [...nodesRef.current] }
+          // 捕获 reviewer 节点的测试执行结果
+          if (nodeName === 'reviewer' && event.summary?._test_results) {
+            patch.testResults = event.summary._test_results
+          }
+          updateWorkflow(threadId, patch)
           break
         }
         case 'interrupt': {
@@ -103,11 +108,12 @@ export function useWorkflow(threadId: string | null) {
       updateWorkflow(threadId, {
         error: state.error,
         result: state.code,
+        testResults: (state as Record<string, unknown>).testResults as never ?? null,
       })
     } catch (err) {
       if ((err as Error).message?.includes('404')) {
         updateWorkflow(threadId, { error: '工作流已过期' })
-        throw err // 阻止 SSE 重连循环
+        throw err
       }
       console.error('[useWorkflow] 状态刷新失败:', err)
     }

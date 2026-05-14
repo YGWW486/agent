@@ -3,6 +3,8 @@
 import logging
 import time
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # 添加上级目录到路径
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

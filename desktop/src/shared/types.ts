@@ -120,6 +120,16 @@ export interface WrittenFile {
   size: number
 }
 
+export interface TestResults {
+  ran: boolean
+  passed: number
+  failed: number
+  total: number
+  output: string
+  message?: string
+  return_code?: number
+}
+
 export interface WorkflowUIState {
   threadId: string
   nodes: TimelineNode[]
@@ -128,4 +138,5 @@ export interface WorkflowUIState {
   error: string
   result: string
   writtenFiles: WrittenFile[]
+  testResults: TestResults | null
 }
