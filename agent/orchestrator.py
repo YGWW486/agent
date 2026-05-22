@@ -1,6 +1,9 @@
 """LangGraph Agent 编排器 — Planner → Coder → Reviewer 三节点流水线（Phase 1 加固版）"""
 
 import logging
+import subprocess
+import tempfile
+import os
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -14,6 +17,10 @@ from agent.coder_loop import (
 from agent.context_builder import build_planner_context, build_coder_context
 from agent.llm import get_llm
 from agent.retry import retry_async, RetryConfig, CircuitBreaker
+from agent.context import get_graph_index
+from agent.llm import create_llm
+from agent.llm import create_llm, get_llm
+from agent.retry import CircuitBreaker
 from agent.models import (
     TaskDAG, CoderOutput, ReviewResult,
     dag_to_json, dag_from_json,
@@ -60,6 +67,9 @@ class AgentState(TypedDict):
 
     # ── Phase 4: workspace root override ──
     workspace_root: str
+
+    # ── new: test execution ──
+    test_results: str  # JSON-serialized test execution results
 
 # ── Prompts ────────────────────────────────────────────
 
@@ -114,13 +124,113 @@ REVIEWER_SYSTEM = """你是一个严格的代码审查者。你的唯一输出�
 
 只输出 output_review 工具调用，不要输出任何其他文字。"""
 
+
+def _run_test_cases(test_cases: list, coder_files: list | None = None) -> dict:
+    """在临时目录中运行 Reviewer 生成的测试用例，返回执行结果。
+
+    写入测试文件到临时目录，通过 subprocess 调用 pytest，
+    捕获 stdout/stderr，解析 pass/fail/error 计数。
+    """
+    import json
+
+    if not test_cases:
+        return {"ran": False, "message": "没有测试用例", "passed": 0, "failed": 0, "total": 0, "output": ""}
+
+    tmpdir = tempfile.mkdtemp(prefix="aec-tests-")
+    test_files_written = []
+
+    try:
+        # 如果有 coder 产出文件，写入它们以便测试可以 import
+        if coder_files:
+            for fc in coder_files:
+                filepath = os.path.join(tmpdir, os.path.basename(fc.get("path", "")))
+                if filepath.endswith(".py"):
+                    try:
+                        with open(filepath, "w", encoding="utf-8") as f:
+                            f.write(fc.get("content", ""))
+                    except Exception:
+                        pass
+
+        # 写入测试文件
+        for i, tc in enumerate(test_cases):
+            code = tc.get("code", "") if isinstance(tc, dict) else getattr(tc, "code", "")
+            name = tc.get("name", f"test_case_{i}") if isinstance(tc, dict) else getattr(tc, "name", f"test_case_{i}")
+            safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)[:60]
+            filename = f"test_{i}_{safe_name}.py"
+            filepath = os.path.join(tmpdir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("import pytest\n\n")
+                f.write(code)
+            test_files_written.append(filepath)
+
+        # 运行 pytest
+        result = subprocess.run(
+            ["python", "-m", "pytest", "-v", "--tb=short", "--timeout=30"] + test_files_written,
+            capture_output=True, text=True, timeout=60, cwd=tmpdir,
+        )
+
+        output = result.stdout[-4000:] if len(result.stdout) > 4000 else result.stdout
+        if result.stderr:
+            output += "\n[stderr]\n" + (result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr)
+
+        # 解析 pytest 摘要行
+        passed = 0
+        failed = 0
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if "passed" in line and ("failed" in line or "error" in line):
+                import re
+                passed_match = re.search(r"(\d+)\s+passed", line)
+                failed_match = re.search(r"(\d+)\s+failed", line)
+                error_match = re.search(r"(\d+)\s+error", line)
+                if passed_match:
+                    passed = int(passed_match.group(1))
+                if failed_match or error_match:
+                    failed = (int(failed_match.group(1)) if failed_match else 0) + (int(error_match.group(1)) if error_match else 0)
+                break
+
+        total = passed + failed
+        if total == 0:
+            total = len(test_cases)
+            if result.returncode == 0:
+                passed = total
+            else:
+                failed = total
+
+        return {
+            "ran": True,
+            "passed": passed,
+            "failed": failed,
+            "total": total,
+            "output": output,
+            "return_code": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "passed": 0, "failed": len(test_cases), "total": len(test_cases), "output": "Test execution timed out (60s)", "return_code": -1}
+    except FileNotFoundError:
+        logger.warning("[TestRunner] pytest not available, skipping test execution")
+        return {"ran": False, "message": "pytest 不可用", "passed": 0, "failed": 0, "total": len(test_cases), "output": ""}
+    except Exception as e:
+        logger.error(f"[TestRunner] Failed: {e}")
+        return {"ran": True, "passed": 0, "failed": len(test_cases), "total": len(test_cases), "output": str(e), "return_code": -1}
+    finally:
+        # 清理临时文件
+        for f in test_files_written:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+        try:
+            os.rmdir(tmpdir)
+        except Exception:
+            pass
+
 # ── Node Functions ─────────────────────────────────────
 
 async def planner_node(state: AgentState) -> dict:
     """将 spec 拆解为结构化 TaskDAG"""
     logger.info("[Planner] Decomposing spec into TaskDAG...")
     settings = get_settings()
-    llm = get_llm()
 
     user_prompt = f"""## 需求规格
 {state['spec']}
@@ -128,24 +238,18 @@ async def planner_node(state: AgentState) -> dict:
 ## 项目上下文
 {build_planner_context(state)}"""
 
-    retry_cfg = RetryConfig(
-        max_retries=settings.PLANNER_RETRY_MAX,
-        initial_delay=settings.PLANNER_RETRY_DELAY,
-        max_delay=3.0,
+    structured_llm = (
+        create_llm(mode="structured")
+        .with_retry(stop_after_attempt=settings.PLANNER_RETRY_MAX + 1)
+        .with_structured_output(TaskDAG)
     )
-
-    async def _do_plan():
-        return await llm.chat_with_structured_output(
-            system=PLANNER_SYSTEM,
-            messages=[{"role": "user", "content": user_prompt}],
-            output_model=TaskDAG,
-            tool_name="output_plan",
-            tool_description="输出实现计划的任务 DAG（有向无环图）",
-        )
 
     try:
         dag: TaskDAG = await _llm_circuit.call(
-            lambda: retry_async(_do_plan, retry_cfg),
+            lambda: structured_llm.ainvoke([
+                {"role": "system", "content": PLANNER_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]),
         )
         logger.info(f"[Planner] TaskDAG: {dag.task_count} tasks")
         return {
@@ -171,11 +275,9 @@ async def coder_node(state: AgentState) -> dict:
     """根据当前任务生成/修改代码，支持 next_task 和 revise 两种模式"""
     settings = get_settings()
 
-    # 解析结构和当前进度
     dag = dag_from_json(state.get("plan", "{}"))
     review_raw = state.get("review", "")
 
-    # 判断是否从上一任务 PASS 而来（next_task 模式）
     is_next_task = False
     try:
         prev_review = review_from_json(review_raw)
@@ -183,7 +285,6 @@ async def coder_node(state: AgentState) -> dict:
     except Exception:
         prev_review = None
 
-    # 确定任务索引
     task_idx = state.get("current_task_index", 0)
     if is_next_task:
         task_idx += 1
@@ -198,7 +299,6 @@ async def coder_node(state: AgentState) -> dict:
 
     llm = get_llm()
 
-    # 构建上下文
     task_context = f"""## 当前任务
 - ID: {current_task.task_id}
 - 描述: {current_task.description}
@@ -242,12 +342,6 @@ async def coder_node(state: AgentState) -> dict:
 
 请生成完整代码。"""
 
-    retry_cfg = RetryConfig(
-        max_retries=settings.CODER_RETRY_MAX,
-        initial_delay=settings.CODER_RETRY_DELAY,
-        max_delay=3.0,
-    )
-
     async def _do_code():
         if coder_tools_enabled(settings):
             return await run_coder_with_tools(
@@ -263,9 +357,7 @@ async def coder_node(state: AgentState) -> dict:
         )
 
     try:
-        coder_out: CoderOutput = await _llm_circuit.call(
-            lambda: retry_async(_do_code, retry_cfg),
-        )
+        coder_out: CoderOutput = await _llm_circuit.call(_do_code)
         logger.info(f"[Coder] Output: {len(coder_out.diff)} chars, "
                     f"self_check: {len(coder_out.self_check.items)} items")
         result: dict = {
@@ -294,7 +386,7 @@ async def coder_node(state: AgentState) -> dict:
 async def reviewer_node(state: AgentState) -> dict:
     """审查 Coder 产出，输出结构化 ReviewResult"""
     logger.info("[Reviewer] Reviewing code...")
-    llm = get_llm(model=get_settings().MODEL_ROUTING["complex"])
+    llm = get_llm()
 
     coder_code = state.get("code", "")
     try:
@@ -303,7 +395,6 @@ async def reviewer_node(state: AgentState) -> dict:
     except Exception:
         self_check_summary = "无法解析"
 
-    # 获取当前任务验收条件
     try:
         dag = dag_from_json(state.get("plan", "{}"))
         task = dag.current_task(state.get("current_task_index", 0))
@@ -334,15 +425,31 @@ async def reviewer_node(state: AgentState) -> dict:
         result: ReviewResult = result_raw
         settings = get_settings()
 
+        import json as _json
+
+        test_results_str = state.get("test_results", "")
+        if result.verdict == "PASS" and result.test_cases:
+            tc_dicts = [t.model_dump() for t in result.test_cases]
+            logger.info(f"[Reviewer] Running {len(tc_dicts)} test case(s)...")
+            test_results = _run_test_cases(tc_dicts)
+            test_results_str = _json.dumps(test_results, ensure_ascii=False)
+            p = test_results.get("passed", 0)
+            f = test_results.get("failed", 0)
+            logger.info(f"[Reviewer] Test results: {p} passed, {f} failed")
+
         if result.verdict == "PASS":
             logger.info("[Reviewer] Verdict: PASS")
-            return {"review": review_to_json(result)}
+            return {
+                "review": review_to_json(result),
+                "test_results": test_results_str,
+            }
 
         new_count = state.get("revision_count", 0) + 1
         logger.info(f"[Reviewer] Verdict: REJECT (revision {new_count})")
         payload: dict = {
             "review": review_to_json(result),
             "revision_count": new_count,
+            "test_results": test_results_str,
         }
         if settings.MAX_REVISIONS > 0 and new_count >= settings.MAX_REVISIONS:
             payload.update({

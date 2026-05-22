@@ -23,6 +23,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
         error: '',
         result: '',
         writtenFiles: [],
+        testResults: null,
       })
       return { workflows: next }
     }),

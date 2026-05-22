@@ -92,6 +92,28 @@ pnpm install
 cd ..
 ```
 
+> **常见问题：Electron 二进制未下载**
+>
+> `pnpm install` 完成后，Electron 的二进制文件（~188 MB）可能因网络或权限问题未能自动下载。表现为 `pnpm dev` 报错 `Error: Electron uninstall`。
+>
+> **验证是否已下载**：
+> ```powershell
+> # 存在 dist/ 目录和 path.txt 即为正常
+> ls desktop\node_modules\electron\dist\electron.exe
+> ls desktop\node_modules\electron\path.txt
+> ```
+>
+> **如果缺失，手动下载**：
+> ```powershell
+> cd desktop
+> # 国内网络先设镜像
+> $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+> # 执行安装脚本，下载 Electron 二进制到 node_modules/electron/dist/
+> node node_modules/electron/install.js
+> ```
+>
+> 详见 [第 9 节故障排查](#91-常见问题) 和 [第 10.3 节坑 1](#坑-1pnpm-把-electron-二进制隔离到-ignored)。
+
 ### 2.3 配置环境变量
 
 复制并编辑 `.env` 文件：
@@ -597,6 +619,7 @@ HITL 中断时 `interrupt` 事件 `next_actions` 为 `["approve","revise"]`。
 | SSE 连接断开 | 后端崩溃或超时 | 自动重连（指数退避），无需手动操作 |
 | `HOST=0.0.0.0` 被覆盖 | python-manager 强制 127.0.0.1 | 安全红线，不可更改 |
 | `pnpm: command not found` | 未安装 pnpm | `npm install -g pnpm` |
+| `Error: Electron uninstall` (pnpm dev 启动报错) | Electron 二进制文件未下载到 `node_modules/electron/dist/`，缺少 `path.txt` | 手动运行 `node node_modules/electron/install.js`，国内可先设 `$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"` |
 | electron-builder 下载慢 | 国内网络 | 设置 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` |
 
 ### 9.2 日志查看
@@ -684,13 +707,29 @@ D:\ZHIYI\AUTO\qa\
 
 ### 10.3 打包踩坑记录
 
-**坑 1：pnpm 把 Electron 二进制隔离到 .ignored**
+**坑 1：pnpm 导致 Electron 二进制缺失 → `Error: Electron uninstall`**
 
-- **现象**：`pnpm dev` 报错 `Error: Electron uninstall`
-- **原因**：pnpm 安全策略把 `electron/dist/electron.exe`（188 MB）隔离到 `node_modules/.ignored/electron/dist/`
-- **临时绕过**：`$env:ELECTRON_EXEC_PATH = "node_modules/.ignored/electron/dist/electron.exe"`
-- **永久修复**：复制 `path.txt` + 创建目录 Junction：
+- **现象**：`pnpm dev` 报错 `Error: Electron uninstall`，`node_modules/electron/` 下缺少 `dist/` 目录和 `path.txt`
+- **原因 A**：Electron 的 postinstall 下载脚本未执行（网络超时 / pnpm 权限限制 / postinstall 被 electron-builder 钩子覆盖）
+- **原因 B**：pnpm 安全策略把已下载的 `electron/dist/electron.exe`（188 MB）隔离到 `node_modules/.ignored/electron/dist/`
+- **诊断**：先确认二进制是否被隔离到 `.ignored`：
   ```powershell
+  ls desktop\node_modules\.ignored\electron\dist\electron.exe   # 如果存在 → 原因 B
+  ```
+- **修复 A（二进制未下载）**——手动运行 Electron 安装脚本：
+  ```powershell
+  cd desktop
+  # 国内网络先设镜像
+  $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+  # 下载 ~188MB 的 Electron 二进制到 node_modules/electron/dist/
+  node node_modules/electron/install.js
+  ```
+- **修复 B（二进制被 .ignored 隔离）**——环境变量临时绕过或创建 Junction：
+  ```powershell
+  # 临时绕过（设置环境变量后立即生效）
+  $env:ELECTRON_EXEC_PATH = "node_modules\.ignored\electron\dist\electron.exe"
+
+  # 永久修复（复制 path.txt + 创建目录 Junction）
   Copy-Item "node_modules\.ignored\electron\path.txt" "node_modules\electron\path.txt"
   mklink /J "node_modules\electron\dist" "node_modules\.ignored\electron\dist"
   ```

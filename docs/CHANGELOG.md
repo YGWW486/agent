@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-05-14 · 工具调用层迁移 + 架构分析
+
+### 计划
+- 自研 LLM Provider 层（`AnthropicLLM` / `DeepSeekLLM`）迁移到 LangChain 原生抽象
+- 工具调用统一使用 `with_structured_output()`，消除 Anthropic ↔ OpenAI 格式手动翻译
+- 重试逻辑从自研 `retry_async` 迁移到 LangChain 内置 `with_retry()`
+
+### 完成
+
+**工具调用层迁移**
+- `agent/llm.py` 重写：460 行 → 145 行
+  - 删除 `AnthropicLLM`、`DeepSeekLLM` 两个类（手动构造 tool schema、Anthropic/OpenAI 格式互译）
+  - 新增 `create_llm()` 工厂函数，mode 三态：`chat` / `thinking` / `structured`
+  - 新增 `TokenTracker` LangChain callback，替代旧两个类各自的 `_track_usage`
+  - DeepSeek `thinking_mode` 透传：`ChatOpenAI(model_kwargs={"thinking_mode": "non-thinking"})`
+- `agent/retry.py` 精简：删除 `RetryConfig`、`retry_async`、`with_retry`，保留 `CircuitBreaker`、`FallbackHandler`
+- `agent/orchestrator.py` 三个节点统一：
+  - 改前：`llm.chat_with_structured_output(system=..., messages=..., output_model=TaskDAG, tool_name="output_plan", ...)`
+  - 改后：`create_llm(mode="structured").with_retry(stop_after_attempt=N).with_structured_output(TaskDAG).ainvoke(messages)`
+- `agent/__init__.py` + `api/routes.py` 适配新导出（`get_llm_info` 替代 `get_llm().model` / `get_llm().token_usage()`）
+- `requirements.txt` 新增 4 个依赖：`langchain-core>=0.3.0`、`langchain-anthropic>=0.3.0`、`langchain-openai>=0.3.0`、`tenacity>=8.0.0`
+
+**架构分析**
+- 定位：LangGraph 编排 + LangChain 工具抽象，在"自研太累"和"框架太重"之间取平衡点
+- 对比 MCP：PRD 已明确不做 MCP Server，三个工具（output_plan/output_code/output_review）是硬编码流水线节点，MCP 徒增复杂度
+- 对比 CrewAI/AutoGen：不换全套框架，LangGraph StateGraph + checkpoint + HITL 编排能力更强更透明
+- 选用 `with_structured_output()` 而非 `bind_tools() + ToolNode`：因为三个"工具"本质是不同 LLM 节点的输出 schema，不是需要执行的函数
+- 唯一保留的自研组件：`CircuitBreaker`（工作流级熔断），LangChain 无等价物
+
+### 验证
+- 全部 13 个已有测试通过（`pytest tests/ -v`）
+- Anthropic + DeepSeek 双路径导入正常
+- LangGraph 流水线编译通过（`CompiledStateGraph`）
+
+### 不变的部分
+- LangGraph StateGraph 结构（planner → coder → reviewer → merge）
+- Bridge 层 / API 路由 / Electron 前端：零改动
+- Pydantic 模型（TaskDAG、CoderOutput、ReviewResult）：零改动
+
+---
+
 ## 2026-05-13 · 打包流程贯通 + UI 中文化 + 设计升级 + UX 第一批
 
 ### 计划
