@@ -72,33 +72,63 @@ export interface IndexStats {
   loaded_at: string
 }
 
+export interface RegisteredSkill {
+  name: string
+  category: string
+  description: string
+  parameters: Record<string, unknown>
+  execution_count?: number
+}
+
 export interface SkillsResponse {
   workflow: string
   hitl: string
   models: ModelRouting
   max_revisions: number
   features: string[]
+  registered_skills?: RegisteredSkill[]
 }
 
 export type SSEEventType =
   | 'node_start'
   | 'node_complete'
+  | 'tool_call'
+  | 'tool_result'
   | 'interrupt'
   | 'workflow_complete'
   | 'workflow_error'
   | 'stream_end'
   | 'heartbeat'
 
+export type ToolStepStatus = 'running' | 'success' | 'warning' | 'error'
+export type ObsStatus = 'success' | 'warning' | 'error'
+
+export interface ToolStep {
+  tool: string
+  status: ToolStepStatus
+  summary: string
+  input?: Record<string, unknown>
+  timestamp?: string
+}
+
 export interface SSEEvent {
   event: SSEEventType
   node?: string
   timestamp?: string
-  summary?: Record<string, unknown>
+  /** P5: 人可读结论（字符串）；历史数据可能无此字段 */
+  summary?: string
+  detail?: Record<string, unknown>
+  next_actions?: string[]
+  artifacts?: Record<string, unknown>
+  status?: ObsStatus | ToolStepStatus
   suspended?: boolean
   failure_reason?: string
   message?: string
   thread_id?: string
   error?: string
+  tool?: string
+  input?: Record<string, unknown>
+  tool_summary?: string
 }
 
 export type NodeStatus = 'pending' | 'running' | 'success' | 'failed' | 'suspended'
@@ -107,11 +137,15 @@ export interface TimelineNode {
   name: string
   label: string
   status: NodeStatus
+  /** 节点 detail（_diff、_tasks 等） */
   summary: Record<string, unknown> | null
+  observation_summary?: string
+  next_actions?: string[]
   started_at: string | null
   completed_at: string | null
   suspended: boolean
   failure_reason: string
+  tool_steps?: ToolStep[]
 }
 
 export interface WrittenFile {
@@ -125,6 +159,7 @@ export interface WorkflowUIState {
   nodes: TimelineNode[]
   spec: string
   interrupt: boolean
+  hitl_next_actions?: string[]
   error: string
   result: string
   writtenFiles: WrittenFile[]

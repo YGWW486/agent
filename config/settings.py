@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     CIRCUIT_BREAKER_RECOVERY: float = 60.0
 
     # Agent 工作流配置
-    MAX_REVISIONS: int = 3
+    MAX_REVISIONS: int = 0  # 0 = 不限 Reviewer 修订轮次
     WORKFLOW_TIMEOUT: int = 300
 
     # Phase 1: Pipeline retry config
@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     # 成本控制
     DAILY_TOKEN_BUDGET: int = 1_000_000
     TASK_TOKEN_LIMIT: int = 100_000
+
+    # 上下文预算（P2）
+    PLANNER_CONTEXT_MAX_FILES: int = 30
+    CODER_CONTEXT_DEPTH: int = 2
+    CODER_CONTEXT_MAX_FILES: int = 15
+    CONTEXT_MAX_CHARS: int = 24_000
+
+    # Phase 4: Coder 只读 Tool Runtime
+    CODER_TOOLS_ENABLED: bool = False
+    CODER_TOOL_MAX_ROUNDS: int = 5
+    WORKSPACE_ROOT: str = ""
+    READ_FILE_MAX_BYTES: int = 65_536
+    SEARCH_RG_MAX_RESULTS: int = 50
+    SEARCH_RG_TIMEOUT_SEC: int = 5
 
     class Config:
         env_file = ".env"

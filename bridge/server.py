@@ -38,8 +38,16 @@ def _setup_langsmith():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
+    from agent.skill_dispatcher import get_dispatcher
+    from agent.skills.builtin import register_builtin_skills
+    from bridge.workflow_worker import start_workflow_worker, stop_workflow_worker
+
     settings = get_settings()
     _setup_langsmith()
+    register_builtin_skills(get_dispatcher())
+    start_workflow_worker()
 
     logger.info(f"Agent Server starting on {settings.HOST}:{settings.PORT}")
     logger.info(f"Default model: {settings.ANTHROPIC_DEFAULT_MODEL}")
@@ -47,6 +55,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    await stop_workflow_worker()
     logger.info("Agent Server shutting down...")
 
 

@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react'
 import { useSSE } from './useSSE'
 import { useApi } from './useApi'
 import { useWorkflowStore } from '@/stores/workflow.store'
-import type { SSEEvent, TimelineNode, NodeStatus } from '../../shared/types'
+import type { SSEEvent, TimelineNode, NodeStatus, ToolStepStatus } from '../../shared/types'
 
 const NODE_LABELS: Record<string, string> = {
   planner: 'Planner',
@@ -21,7 +21,38 @@ function createInitialNodes(): TimelineNode[] {
     completed_at: null,
     suspended: false,
     failure_reason: '',
+    tool_steps: [],
   }))
+}
+
+function appendCoderToolStep(
+  nodes: TimelineNode[],
+  step: { tool: string; status: ToolStepStatus; summary: string; input?: Record<string, unknown>; timestamp?: string },
+): TimelineNode[] {
+  return nodes.map((n) =>
+    n.name === 'coder'
+      ? { ...n, tool_steps: [...(n.tool_steps ?? []), step] }
+      : n,
+  )
+}
+
+function updateCoderToolResult(
+  nodes: TimelineNode[],
+  tool: string,
+  status: ToolStepStatus,
+  summary: string,
+): TimelineNode[] {
+  return nodes.map((n) => {
+    if (n.name !== 'coder') return n
+    const steps = [...(n.tool_steps ?? [])]
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (steps[i].tool === tool && steps[i].status === 'running') {
+        steps[i] = { ...steps[i], status, summary }
+        break
+      }
+    }
+    return { ...n, tool_steps: steps }
+  })
 }
 
 export function useWorkflow(threadId: string | null) {
@@ -46,18 +77,31 @@ export function useWorkflow(threadId: string | null) {
         }
         case 'node_complete': {
           const nodeName = event.node ?? ''
-          const nodeStatus: NodeStatus = event.suspended
+          const obsStatus = event.status
+          let nodeStatus: NodeStatus = event.suspended
             ? event.failure_reason
               ? 'failed'
               : 'suspended'
             : 'success'
+          if (obsStatus === 'error') nodeStatus = 'failed'
+          else if (obsStatus === 'warning' && !event.suspended) nodeStatus = 'success'
+
+          const detail =
+            event.detail ??
+            (typeof event.summary === 'object' && event.summary !== null
+              ? (event.summary as Record<string, unknown>)
+              : null)
+
           nodesRef.current = nodesRef.current.map((n) =>
             n.name === nodeName
               ? {
                   ...n,
                   status: nodeStatus,
                   completed_at: event.timestamp ?? null,
-                  summary: event.summary ?? null,
+                  summary: detail,
+                  observation_summary:
+                    typeof event.summary === 'string' ? event.summary : n.observation_summary,
+                  next_actions: event.next_actions ?? [],
                   suspended: event.suspended ?? false,
                   failure_reason: event.failure_reason ?? '',
                 }
@@ -66,8 +110,34 @@ export function useWorkflow(threadId: string | null) {
           updateWorkflow(threadId, { nodes: [...nodesRef.current] })
           break
         }
+        case 'tool_call': {
+          nodesRef.current = appendCoderToolStep(nodesRef.current, {
+            tool: event.tool ?? 'unknown',
+            status: 'running',
+            summary: '',
+            input: event.input,
+            timestamp: event.timestamp,
+          })
+          updateWorkflow(threadId, { nodes: [...nodesRef.current] })
+          break
+        }
+        case 'tool_result': {
+          const st = (event.status ?? 'success') as ToolStepStatus
+          const text = event.tool_summary ?? (typeof event.summary === 'string' ? event.summary : '')
+          nodesRef.current = updateCoderToolResult(
+            nodesRef.current,
+            event.tool ?? 'unknown',
+            st,
+            text,
+          )
+          updateWorkflow(threadId, { nodes: [...nodesRef.current] })
+          break
+        }
         case 'interrupt': {
-          updateWorkflow(threadId, { interrupt: true })
+          updateWorkflow(threadId, {
+            interrupt: true,
+            hitl_next_actions: event.next_actions ?? ['approve', 'revise'],
+          })
           break
         }
         case 'workflow_complete': {

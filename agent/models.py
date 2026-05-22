@@ -74,6 +74,25 @@ class ReviewResult(BaseModel):
     verdict: Literal["PASS", "REJECT"]
     reason: str
     test_cases: list[TestCase] = Field(..., min_length=1, description="至少一个可运行测试")
+    source: Literal["reviewer", "human"] = "reviewer"
+
+
+def human_reject_review(comment: str) -> ReviewResult:
+    """人工审批拒绝 — 合法 ReviewResult，不计入 reviewer 修订轮次"""
+    return ReviewResult(
+        verdict="REJECT",
+        reason=f"人工审查拒绝: {comment}",
+        source="human",
+        test_cases=[
+            TestCase(
+                name="manual_reject_placeholder",
+                code=(
+                    'def test_manual_reject():\n'
+                    '    assert False, "人工拒绝，需修订后重新提交审批"\n'
+                ),
+            )
+        ],
+    )
 
 
 # ── JSON 序列化辅助（AgentState TypedDict 字段为 str 类型，需手动序列化） ──

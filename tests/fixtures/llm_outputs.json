@@ -1,0 +1,26 @@
+{
+  "task_dag": {
+    "tasks": [
+      {
+        "task_id": "t1",
+        "description": "Implement feature",
+        "estimated_minutes": 5,
+        "file_scope": [],
+        "acceptance_conditions": [{"id": "AC-1", "description": "works"}],
+        "dependencies": []
+      }
+    ]
+  },
+  "review_pass": {
+    "verdict": "PASS",
+    "reason": "ok",
+    "test_cases": [{"name": "t", "code": "def test_t(): pass"}],
+    "source": "reviewer"
+  },
+  "review_reject": {
+    "verdict": "REJECT",
+    "reason": "needs fix",
+    "test_cases": [{"name": "t", "code": "def test_t(): pass"}],
+    "source": "reviewer"
+  }
+}

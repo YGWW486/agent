@@ -6,7 +6,12 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from agent.context import get_graph_index
+from agent.coder_loop import (
+    coder_tools_enabled,
+    run_coder_single_shot,
+    run_coder_with_tools,
+)
+from agent.context_builder import build_planner_context, build_coder_context
 from agent.llm import get_llm
 from agent.retry import retry_async, RetryConfig, CircuitBreaker
 from agent.models import (
@@ -48,6 +53,13 @@ class AgentState(TypedDict):
     failure_reason: str
     failed_node: str
     consecutive_coder_failures: int
+
+    # ── token budget (P1) ──
+    tokens_input: int
+    tokens_output: int
+
+    # ── Phase 4: workspace root override ──
+    workspace_root: str
 
 # ── Prompts ────────────────────────────────────────────
 
@@ -114,7 +126,7 @@ async def planner_node(state: AgentState) -> dict:
 {state['spec']}
 
 ## 项目上下文
-{_build_context(state)}"""
+{build_planner_context(state)}"""
 
     retry_cfg = RetryConfig(
         max_retries=settings.PLANNER_RETRY_MAX,
@@ -198,30 +210,33 @@ async def coder_node(state: AgentState) -> dict:
     for ac in current_task.acceptance_conditions:
         task_context += f"- {ac.id}: {ac.description}\n"
 
-    # 项目级别的文件摘要
-    project_overview = _build_context(state)
+    project_context = build_coder_context(state, current_task)
 
     if is_next_task:
         user_prompt = f"""## 项目上下文
-{project_overview}
+{project_context}
 
 {task_context}
 
 请生成完整代码。"""
     elif prev_review is not None and prev_review.verdict == "REJECT":
-        user_prompt = f"""## 审查反馈（请修改代码以解决以下问题）
+        if prev_review.source == "human":
+            feedback_title = "## 人工审查反馈（请修改代码后重新提交审批）"
+        else:
+            feedback_title = "## 审查反馈（请修改代码以解决以下问题）"
+        user_prompt = f"""{feedback_title}
 {review_raw}
 
 {task_context}
 
 ## 项目上下文
-{project_overview}
+{project_context}
 
 ## 之前的代码
 {state.get('code', '')}"""
     else:
         user_prompt = f"""## 项目上下文
-{project_overview}
+{project_context}
 
 {task_context}
 
@@ -234,12 +249,17 @@ async def coder_node(state: AgentState) -> dict:
     )
 
     async def _do_code():
-        return await llm.chat_with_structured_output(
+        if coder_tools_enabled(settings):
+            return await run_coder_with_tools(
+                llm=llm,
+                user_prompt=user_prompt,
+                state=state,
+                settings=settings,
+            )
+        return await run_coder_single_shot(
+            llm=llm,
+            user_prompt=user_prompt,
             system=CODER_SYSTEM,
-            messages=[{"role": "user", "content": user_prompt}],
-            output_model=CoderOutput,
-            tool_name="output_code",
-            tool_description="输出代码变更和自检报告",
         )
 
     try:
@@ -248,13 +268,16 @@ async def coder_node(state: AgentState) -> dict:
         )
         logger.info(f"[Coder] Output: {len(coder_out.diff)} chars, "
                     f"self_check: {len(coder_out.self_check.items)} items")
-        return {
+        result: dict = {
             "code": coder_output_to_json(coder_out),
             "status": "reviewing",
             "current_task_index": task_idx,
             "retry_count": 0,
             "consecutive_coder_failures": 0,
         }
+        if is_next_task:
+            result["revision_count"] = 0
+        return result
     except Exception as e:
         logger.error(f"[Coder] Failed: {e}")
         consecutive = state.get("consecutive_coder_failures", 0) + 1
@@ -309,15 +332,35 @@ async def reviewer_node(state: AgentState) -> dict:
             tool_description="输出代码审查结论（PASS/REJECT）和测试用例",
         )
         result: ReviewResult = result_raw
+        settings = get_settings()
+
+        if result.verdict == "PASS":
+            logger.info("[Reviewer] Verdict: PASS")
+            return {"review": review_to_json(result)}
+
         new_count = state.get("revision_count", 0) + 1
-        logger.info(f"[Reviewer] Verdict: {result.verdict} (revision {new_count})")
-        return {
+        logger.info(f"[Reviewer] Verdict: REJECT (revision {new_count})")
+        payload: dict = {
             "review": review_to_json(result),
             "revision_count": new_count,
         }
+        if settings.MAX_REVISIONS > 0 and new_count >= settings.MAX_REVISIONS:
+            payload.update({
+                "suspended": True,
+                "status": "suspended",
+                "failure_reason": f"已达最大修订轮次 ({settings.MAX_REVISIONS})",
+                "failed_node": "reviewer",
+            })
+        return payload
     except Exception as e:
         logger.error(f"[Reviewer] Failed: {e}")
-        return {"error": str(e), "status": "failed"}
+        return {
+            "error": str(e),
+            "status": "failed",
+            "failed_node": "reviewer",
+            "failure_reason": f"Reviewer 失败: {e}",
+            "review": "",
+        }
 
 
 def merge_node(state: AgentState) -> dict:
@@ -485,38 +528,13 @@ def route_after_review(state: AgentState) -> str:
             logger.info(f"[Router] Task {task_idx} PASS → next task {next_idx + 1}/{dag.task_count}")
             return "next_task"
 
+    settings = get_settings()
+    if settings.MAX_REVISIONS > 0 and state.get("revision_count", 0) >= settings.MAX_REVISIONS:
+        logger.warning("[Router] 修订轮次已达上限 → suspend")
+        return "suspend"
+
     logger.info(f"[Router] REJECT → revise (revision {state.get('revision_count', 0)})")
     return "revise"
-
-
-# ── Context Helper ────────────────────────────────────
-
-def _build_context(state: dict) -> str:
-    """从 GraphIndex 获取项目上下文摘要。
-
-    Planner 阶段获取全仓概览（所有文件的 node 摘要列表）。
-    若索引未加载，回退到 state 中传入的 context 字符串。
-    """
-    index = get_graph_index()
-    if not index.is_loaded():
-        return state.get("context", "无额外上下文")
-
-    stats = index.stats()
-    if stats["files_indexed"] == 0:
-        return "已加载索引但未找到文件上下文"
-
-    result = index.query(files=[], depth=0)
-    if result.get("status") == "no_index":
-        return "索引不可用"
-
-    summaries = result.get("file_summaries", {})
-    if not summaries:
-        return "已加载索引但未找到文件摘要"
-
-    lines = [f"项目共 {stats['files_indexed']} 个文件，{stats['node_count']} 个符号节点："]
-    for filepath, summary in sorted(summaries.items()):
-        lines.append(f"  - {filepath}: {summary}")
-    return "\n".join(lines)
 
 
 # ── Graph Builder ──────────────────────────────────────

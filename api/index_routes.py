@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agent.context import get_graph_index
+from bridge.executor import get_executor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["index"])
@@ -28,7 +29,11 @@ async def rebuild_index(req: RebuildRequest):
         )
 
     try:
-        result = index.load(graph_path)
+
+        def _load():
+            return index.load(graph_path)
+
+        result = await get_executor().run(_load)
         logger.info(
             f"[Index] Loaded: {result['node_count']} nodes, "
             f"{result['edge_count']} edges, "

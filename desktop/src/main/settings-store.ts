@@ -15,7 +15,7 @@ const defaults: Settings = {
     standard: 'claude-sonnet-4-6',
     complex: 'claude-opus-4-7',
   },
-  max_revisions: 3,
+  max_revisions: 0,
   workflow_timeout: 300,
   daily_token_budget: 1_000_000,
   task_token_limit: 100_000,

@@ -12,6 +12,9 @@ interface ApprovalPanelProps {
 export function ApprovalPanel({ threadId, nodes }: ApprovalPanelProps) {
   const api = useApi()
   const updateWorkflow = useWorkflowStore((s) => s.updateWorkflow)
+  const hitlActions = useWorkflowStore(
+    (s) => s.getWorkflow(threadId)?.hitl_next_actions ?? ['approve', 'revise'],
+  )
   const [submitting, setSubmitting] = useState(false)
   const [rejectReason, setRejectReason] = useState('')
   const [error, setError] = useState('')
@@ -58,9 +61,21 @@ export function ApprovalPanel({ threadId, nodes }: ApprovalPanelProps) {
 
   return (
     <div className="space-y-4 p-4 rounded-lg border border-status-suspended/25 bg-status-suspended/5">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <AlertTriangle className="w-5 h-5 text-status-suspended" />
         <span className="text-sm font-semibold text-status-suspended">工作流已暂停 — 等待人工审批</span>
+        {hitlActions.length > 0 && (
+          <span className="flex gap-1.5 ml-auto">
+            {hitlActions.map((action) => (
+              <span
+                key={action}
+                className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-text-muted font-mono"
+              >
+                {action}
+              </span>
+            ))}
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-xs">

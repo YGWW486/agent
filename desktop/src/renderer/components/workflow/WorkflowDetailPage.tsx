@@ -5,6 +5,7 @@ import { useWorkflowStore } from '@/stores/workflow.store'
 import { useWorkflow } from '@/hooks/useWorkflow'
 import { useApi } from '@/hooks/useApi'
 import { Timeline } from './Timeline'
+import { ToolStepsList } from './ToolStepsList'
 import { TaskDAGView } from './TaskDAGView'
 import { SelfCheckTable } from './SelfCheckTable'
 import { ApprovalPanel } from './ApprovalPanel'
@@ -16,6 +17,7 @@ import { RotateCcw } from 'lucide-react'
 import type { TimelineNode, WrittenFile } from '../../../shared/types'
 
 function nodeSummary(node: TimelineNode): string | null {
+  if (node.observation_summary) return node.observation_summary
   if (!node.summary) return null
   const s = node.summary as Record<string, unknown>
   switch (node.name) {
@@ -55,6 +57,9 @@ function renderNodeDetail(node: TimelineNode): React.ReactNode {
     const selfCheckItems = (s._self_check as SelfCheckTable['props']['items']) ?? []
     return (
       <div className="space-y-3 pt-2">
+        {node.tool_steps && node.tool_steps.length > 0 ? (
+          <ToolStepsList steps={node.tool_steps} />
+        ) : null}
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="p-2 rounded bg-surface-overlay">
             <span className="text-text-muted">任务序号</span>

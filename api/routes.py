@@ -10,7 +10,27 @@ from pydantic import BaseModel
 
 from agent.orchestrator import get_workflow
 from agent.llm import get_llm
-from agent.models import review_to_json, review_from_json, dag_from_json, coder_output_from_json, ReviewResult
+from agent.budget import (
+    BudgetExceeded,
+    check_daily_budget,
+    check_task_budget,
+    record_node_usage,
+    add_task_tokens_to_daily,
+)
+from agent.models import (
+    review_to_json,
+    review_from_json,
+    dag_from_json,
+    coder_output_from_json,
+    human_reject_review,
+)
+from agent.observation import (
+    build_interrupt_observation,
+    build_node_detail,
+    build_observation,
+    build_workflow_error_observation,
+    observation_to_sse_payload,
+)
 from config.settings import get_settings
 from api.index_routes import router as index_router
 import asyncio
@@ -27,6 +47,7 @@ router = APIRouter(prefix="/api", tags=["agent"])
 class WorkflowRequest(BaseModel):
     spec: str
     context: str = ""
+    workspace_path: str = ""  # 可选，覆盖 WORKSPACE_ROOT / 进程 CWD
 
 class ApproveRequest(BaseModel):
     approved: bool = True
@@ -45,51 +66,28 @@ logger.info(f"[Store] Loaded {len(_workflows)} workflow(s) from disk")
 # ── SSE 辅助 ────────────────────────────────────────────
 
 def _summarize_node_output(node_name: str, output: dict) -> dict:
-    """精简节点输出用于 SSE 推送"""
-    if node_name == "planner":
-        plan = output.get("plan", "")
-        try:
-            from agent.models import dag_from_json
-            dag = dag_from_json(plan)
-            return {
-                "task_count": dag.task_count,
-                "status": output.get("status"),
-                "_tasks": [t.model_dump() for t in dag.tasks],  # 完整任务列表
-            }
-        except Exception:
-            return {"status": output.get("status"), "plan_len": len(plan)}
-    elif node_name == "coder":
-        code = output.get("code", "")
-        task_idx = output.get("current_task_index", 0)
-        summary = {"status": output.get("status"), "code_len": len(code), "task_index": task_idx}
-        try:
-            from agent.models import coder_output_from_json
-            co = coder_output_from_json(code)
-            summary["_diff"] = co.diff
-            summary["_code"] = co.diff  # DiffViewer 需要
-            summary["_self_check"] = [s.model_dump() for s in co.self_check.items]
-            summary["_files"] = [f.model_dump() for f in co.files]
-        except Exception:
-            pass
-        return summary
-    elif node_name == "reviewer":
-        review = output.get("review", "")
-        summary = {"status": output.get("status")}
-        try:
-            from agent.models import review_from_json
-            r = review_from_json(review)
-            summary["verdict"] = r.verdict
-            summary["test_count"] = len(r.test_cases)
-            summary["_test_cases"] = [t.model_dump() for t in r.test_cases]
-        except Exception:
-            pass
-        return summary
-    elif node_name == "merge":
-        result = {"status": output.get("status")}
-        if "written_files" in output:
-            result["_written_files"] = output["written_files"]
-        return result
-    return {}
+    """兼容别名：返回 detail 字典（旧前端读 event.summary 作 detail）"""
+    return build_node_detail(node_name, output)
+
+
+def _node_complete_payload(
+    node_name: str,
+    output: dict,
+    *,
+    thread_id: str,
+) -> dict:
+    """node_complete SSE 载荷 — 顶层 Observation + detail"""
+    obs = build_observation(node_name, output, thread_id=thread_id)
+    payload = {
+        "event": "node_complete",
+        "node": node_name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **observation_to_sse_payload(obs),
+    }
+    if output.get("suspended"):
+        payload["suspended"] = True
+        payload["failure_reason"] = output.get("failure_reason", "")
+    return payload
 
 
 def _push_resume_events(thread_id: str, result: dict, action: str) -> None:
@@ -107,12 +105,8 @@ def _push_resume_events(thread_id: str, result: dict, action: str) -> None:
                 "node": "merge",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
-            await queue.put({
-                "event": "node_complete",
-                "node": "merge",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "summary": {"status": "approved"},
-            })
+            merge_out = {"status": "approved", "written_files": result.get("written_files", [])}
+            await queue.put(_node_complete_payload("merge", merge_out, thread_id=thread_id))
             await queue.put({"event": "workflow_complete", "thread_id": thread_id})
         elif action == "rejected":
             if result.get("suspended"):
@@ -120,6 +114,7 @@ def _push_resume_events(thread_id: str, result: dict, action: str) -> None:
                     "event": "interrupt",
                     "message": "工作流已暂停，等待人工审批",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **build_interrupt_observation(),
                 })
             elif status == "approved":
                 await queue.put({"event": "workflow_complete", "thread_id": thread_id})
@@ -135,14 +130,22 @@ async def _run_workflow_with_events(
 ):
     """后台任务：运行工作流，通过 astream_events 推送 SSE 事件"""
     from agent.orchestrator import get_workflow
+    from agent.runtime_events import reset_event_queue, set_event_queue
 
     workflow = get_workflow()
     config = {"configurable": {"thread_id": thread_id}}
+    llm = get_llm()
+    llm.reset_usage()
+    budget_exceeded = False
+    queue_token = set_event_queue(event_queue)
 
     try:
         timeout = get_settings().WORKFLOW_TIMEOUT
         async with asyncio.timeout(timeout):
             async for event in workflow.astream_events(initial_state, config, version="v2"):
+                if budget_exceeded:
+                    break
+
                 kind = event.get("event", "")
                 node_name = event.get("name", "")
 
@@ -155,30 +158,53 @@ async def _run_workflow_with_events(
                         })
                     elif kind == "on_chain_end":
                         output = event.get("data", {}).get("output", {})
-                        # Keep _workflows updated with latest state from each node
+                        prev_wf = dict(_workflows.get(thread_id, {}))
                         if isinstance(output, dict):
-                            _workflows[thread_id] = {**_workflows.get(thread_id, {}), **output}
-                            store_save(thread_id, _workflows[thread_id])
-                        payload = {
-                            "event": "node_complete",
-                            "node": node_name,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "summary": _summarize_node_output(node_name, output),
-                        }
-                        # Check for suspension
-                        if output.get("suspended"):
-                            payload["suspended"] = True
-                            payload["failure_reason"] = output.get("failure_reason", "")
-                        await event_queue.put(payload)
+                            token_patch = record_node_usage(
+                                {**prev_wf, **output}, llm
+                            )
+                            merged = {**prev_wf, **output, **token_patch}
+                            add_task_tokens_to_daily(merged, prev_wf)
+                            try:
+                                check_task_budget(merged)
+                            except BudgetExceeded as be:
+                                merged.update({
+                                    "suspended": True,
+                                    "status": "suspended",
+                                    "failure_reason": str(be),
+                                    "failed_node": node_name,
+                                })
+                                _workflows[thread_id] = merged
+                                store_save(thread_id, merged)
+                                await event_queue.put({
+                                    "event": "workflow_error",
+                                    "thread_id": thread_id,
+                                    "error": str(be),
+                                    "suspended": True,
+                                    "failure_reason": str(be),
+                                    **build_workflow_error_observation(
+                                        str(be), suspended=True, failure_reason=str(be)
+                                    ),
+                                })
+                                budget_exceeded = True
+                                break
+                            _workflows[thread_id] = merged
+                            store_save(thread_id, merged)
+                            output = merged
+                        await event_queue.put(
+                            _node_complete_payload(node_name, output, thread_id=thread_id)
+                        )
 
                 if kind == "on_chain_interrupt":
                     await event_queue.put({
                         "event": "interrupt",
                         "message": "工作流已暂停，等待人工审批",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
+                        **build_interrupt_observation(),
                     })
 
-        await event_queue.put({"event": "workflow_complete", "thread_id": thread_id})
+        if not budget_exceeded:
+            await event_queue.put({"event": "workflow_complete", "thread_id": thread_id})
 
     except asyncio.TimeoutError:
         logger.error(f"[SSE] Workflow {thread_id} timed out after {timeout}s")
@@ -187,6 +213,7 @@ async def _run_workflow_with_events(
             "event": "workflow_error",
             "thread_id": thread_id,
             "error": f"Workflow timed out after {timeout}s",
+            **build_workflow_error_observation(f"Workflow timed out after {timeout}s"),
         })
     except Exception as e:
         logger.error(f"[SSE] Workflow {thread_id} error: {e}")
@@ -194,8 +221,10 @@ async def _run_workflow_with_events(
             "event": "workflow_error",
             "thread_id": thread_id,
             "error": str(e),
+            **build_workflow_error_observation(str(e)),
         })
     finally:
+        reset_event_queue(queue_token)
         await event_queue.put({"event": "stream_end"})
 
 
@@ -227,6 +256,11 @@ async def list_workflows():
 @router.post("/workflow")
 async def start_workflow(req: WorkflowRequest):
     """提交 spec，启动后台工作流"""
+    try:
+        check_daily_budget()
+    except BudgetExceeded as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
     thread_id = str(uuid.uuid4())[:8]
     event_queue = asyncio.Queue()
     _event_queues[thread_id] = event_queue
@@ -246,17 +280,34 @@ async def start_workflow(req: WorkflowRequest):
         "failure_reason": "",
         "failed_node": "",
         "consecutive_coder_failures": 0,
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "workspace_root": req.workspace_path.strip(),
     }
 
     # Store initial state so get_workflow_status works immediately
     _workflows[thread_id] = dict(initial_state)
     store_save(thread_id, _workflows[thread_id])
 
-    asyncio.create_task(
-        _run_workflow_with_events(thread_id, initial_state, event_queue)
-    )
+    from bridge.request_queue import request_queue
 
-    logger.info(f"[API] Workflow {thread_id} started: {req.spec[:60]}...")
+    job = {
+        "thread_id": thread_id,
+        "initial_state": initial_state,
+        "event_queue": event_queue,
+    }
+    enqueued = await request_queue.put(job, timeout=2.0)
+    if not enqueued:
+        _event_queues.pop(thread_id, None)
+        _workflows.pop(thread_id, None)
+        from bridge.store import remove as store_remove
+        store_remove(thread_id)
+        raise HTTPException(
+            status_code=503,
+            detail="工作流队列已满，请稍后重试",
+        )
+
+    logger.info(f"[API] Workflow {thread_id} enqueued: {req.spec[:60]}...")
 
     return {
         "thread_id": thread_id,
@@ -334,13 +385,7 @@ async def approve_workflow(thread_id: str, req: ApproveRequest):
     else:
         logger.info(f"[API] Workflow {thread_id} REJECTED: {req.comment}")
         # Build a valid ReviewResult JSON so coder can parse it
-        reject_review = review_to_json(
-            ReviewResult(
-                verdict="REJECT",
-                reason=f"人工审查拒绝: {req.comment}",
-                test_cases=[],
-            )
-        )
+        reject_review = review_to_json(human_reject_review(req.comment))
         result = await workflow.ainvoke(
             Command(resume={"approved": False, "review": reject_review}),
             config,
@@ -430,7 +475,7 @@ async def list_capabilities():
         "max_revisions": settings.MAX_REVISIONS,
         "features": [
             "spec → plan 自动拆解",
-            "coder → reviewer 审查循环（最多 3 轮）",
+            "coder → reviewer 审查循环（MAX_REVISIONS=0 不限，>0 超限挂起）",
             "merge 前人工审批（HITL）",
             "LangSmith 全链路追踪",
             "token 用量追踪",

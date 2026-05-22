@@ -21,5 +21,21 @@ coverage/
 # Claude
 .claude/
 graphify-out/
-build/pyinstaller-server/PYZ-00.pyz
-build/pyinstaller-server/agentic-server.pkg
+
+# Runtime data / generated snapshots
+build/
+data/graph_index.db
+data/token_budget.json
+data/workflows/
+Agentic-Engineering-指南.md
+CONTRIBUTING.md
+ECC-COMPLETE-GUIDE.md
+ECC-REVIEW.md
+ECC-完整指令清单.md
+electron-frontend-tracker.md
+面试-技术栈分析.md
+docs/harness-evaluation.md
+docs/harness-refactor-plan.md
+docs/ux-optimization-plan.md
+docs/superpowers/plans/2026-05-05-graphify-integration.md
+docs/superpowers/specs/2026-05-05-graphify-integration-design.md

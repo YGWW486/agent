@@ -5,7 +5,12 @@ export function AdvancedSettings() {
 
   const handleNumber = (key: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const n = Number(e.target.value)
-    if (!isNaN(n) && n > 0) saveToIpc(key, n)
+    if (isNaN(n)) return
+    if (key === 'max_revisions' && n >= 0) {
+      saveToIpc(key, n)
+      return
+    }
+    if (n > 0) saveToIpc(key, n)
   }
 
   return (
@@ -13,7 +18,7 @@ export function AdvancedSettings() {
       <div className="grid grid-cols-2 gap-4">
         {[
           { key: 'port', label: '后端端口', value: settings.port },
-          { key: 'max_revisions', label: '最大修订轮次', value: settings.max_revisions },
+          { key: 'max_revisions', label: '最大修订轮次（0=不限）', value: settings.max_revisions },
           { key: 'workflow_timeout', label: '工作流超时 (秒)', value: settings.workflow_timeout },
           { key: 'task_token_limit', label: '单任务 Token 上限', value: settings.task_token_limit },
         ].map(({ key, label, value }) => (

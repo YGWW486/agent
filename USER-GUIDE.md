@@ -249,13 +249,24 @@ pnpm dev
 
 ### 4.4 类型检查与测试
 
+**后端（Python / Agent harness）** — 仓库根目录，无需 API Key：
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -q
+```
+
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+**桌面端（Electron）**：
+
 ```bash
 cd desktop
 
 # TypeScript 类型检查
 pnpm typecheck
 
-# 运行所有测试 (42 tests)
+# 运行前端单元测试
 pnpm test
 
 # 覆盖率报告
@@ -428,7 +439,7 @@ PORT=8000
 WORKERS=1
 
 # ── 工作流配置 ──
-MAX_REVISIONS=3           # Coder 最大修订轮次
+MAX_REVISIONS=0           # Reviewer 拒绝后最大修订轮次（0=不限，>0 超限挂起）
 WORKFLOW_TIMEOUT=300      # 单个工作流超时（秒）
 
 # ── 重试配置 ──
@@ -446,7 +457,58 @@ TASK_TOKEN_LIMIT=100000     # 单任务 token 上限
 
 # ── GraphIndex ──
 GRAPH_INDEX_DB=data/graph_index.db  # SQLite 持久化路径
+
+# ── 上下文预算（Planner/Coder prompt 组装）──
+PLANNER_CONTEXT_MAX_FILES=30   # Planner 最多展示的文件摘要条数（0=不限不适用，按条数 cap）
+CODER_CONTEXT_DEPTH=2          # Coder 按 file_scope BFS 扩展深度（最大 3）
+CODER_CONTEXT_MAX_FILES=15     # file_scope 为空时的降级概览条数
+CONTEXT_MAX_CHARS=24000        # 单段项目上下文字符硬上限
+
+# ── Coder 只读工具（Phase 4）──
+CODER_TOOLS_ENABLED=false      # 开启 Coder read_file/list_dir/search_repo 子循环
+CODER_TOOL_MAX_ROUNDS=5        # 每轮 Coder 最多 tool 调用轮次
+WORKSPACE_ROOT=                 # 工作区根（空=进程 CWD）；API 可用 workspace_path 覆盖
+READ_FILE_MAX_BYTES=65536      # read_file 单文件上限
+SEARCH_RG_MAX_RESULTS=50       # ripgrep 结果条数上限
+SEARCH_RG_TIMEOUT_SEC=5        # ripgrep 超时（秒）
 ```
+
+**Coder 只读工具（`CODER_TOOLS_ENABLED=true`）**：
+
+- 工具：`read_file`、`list_dir`、`search_repo`（图谱 + ripgrep 混合）。
+- 写盘仍仅由 **Merge** 节点执行；Coder 只输出 `CoderOutput`。
+- 敏感文件（`.env`、`.env.*`、`credentials.json`、`*.pem`、`*.key`）默认不可读。
+- 启动工作流时可传 `workspace_path` 指定项目根目录（见 API `POST /api/workflow`）。
+
+### 7.1.1 SSE 观测契约（Phase 5）
+
+工作流 SSE 事件（`node_complete`、`tool_result`、`interrupt`、`workflow_error`）统一携带：
+
+| 字段 | 说明 |
+|------|------|
+| `status` | `success` / `warning` / `error` |
+| `summary` | 人可读一行结论 |
+| `next_actions` | 建议操作，如 `approve`、`revise`、`resume` |
+| `artifacts` | `thread_id`、文件路径等 |
+| `detail` | 节点深度数据（`_diff`、`_tasks` 等，供 Timeline 展开） |
+
+HITL 中断时 `interrupt` 事件 `next_actions` 为 `["approve","revise"]`。
+
+### 7.1.2 工作流队列
+
+`POST /api/workflow` 将任务放入 `RequestQueue`，后台 worker 消费执行。队列满时返回 **HTTP 503**（`QUEUE_MAXSIZE`，默认 50）。
+
+### 7.1.3 内置 Skills
+
+`GET /api/skills` 的 `registered_skills` 列出已注册技能，当前内置：
+
+- **rebuild_index**：加载 `graph.json` 到 GraphIndex（与 `POST /api/index/rebuild` 等价，经线程池执行）
+
+**行为说明**：
+
+- **Planner**：索引已加载时展示全局 stats + 前 N 个文件摘要；超出部分提示在 Task `file_scope` 中指定路径。
+- **Coder**：按当前 Task 的 `file_scope` 做 BFS 子图注入（节点/边/摘要）；`file_scope` 为空时仅展示降级概览（非全仓无 cap）。
+- **未加载索引**：Planner/Coder 均回退为用户提交的工作区 `context` 文本。
 
 ### 7.2 模型路由
 

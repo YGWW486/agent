@@ -14,7 +14,7 @@ describe('settingsStore', () => {
           standard: 'claude-sonnet-4-6',
           complex: 'claude-opus-4-7',
         },
-        max_revisions: 3,
+        max_revisions: 0,
         workflow_timeout: 300,
         daily_token_budget: 1_000_000,
         task_token_limit: 100_000,
@@ -41,6 +41,6 @@ describe('settingsStore', () => {
 
     expect(useSettingsStore.getState().settings.port).toBe(9999)
     expect(useSettingsStore.getState().settings.host).toBe('127.0.0.1')
-    expect(useSettingsStore.getState().settings.max_revisions).toBe(3)
+    expect(useSettingsStore.getState().settings.max_revisions).toBe(0)
   })
 })

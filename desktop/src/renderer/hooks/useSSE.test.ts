@@ -93,6 +93,28 @@ describe('parseSSEStream', () => {
     })
   })
 
+  it('parses P5 observation fields on node_complete', async () => {
+    const stream = mockStream(
+      sseFrame('node_complete', {
+        node: 'planner',
+        status: 'success',
+        summary: '已拆解 3 个任务',
+        next_actions: [],
+        detail: { task_count: 3 },
+      }),
+    )
+    const events: unknown[] = []
+    await parseSSEStream(stream, (evt) => events.push(evt))
+
+    expect(events[0]).toMatchObject({
+      event: 'node_complete',
+      status: 'success',
+      summary: '已拆解 3 个任务',
+      next_actions: [],
+      detail: { task_count: 3 },
+    })
+  })
+
   it('handles empty data gracefully', async () => {
     const stream = mockStream('event: heartbeat\ndata: \n\n')
     const events: unknown[] = []
